@@ -1,0 +1,37 @@
+
+scripts/git_update.sh
+scripts/update_git.sh
+token.md
+# Objetos y ejecutables
+*.o
+*.exe
+*.out
+*.a
+*.so
+.DS_Store
+
+# Archivos temporales
+*.swp
+*.swo
+*~
+*.d
+
+# IDE
+.vscode/
+.idea/
+*.user
+
+CMakeLists.txt
+fix.sh
+build/
+bin/*
+obj/*
+build/*
+prompt.md
+dicom/
+dicoms/
+
+dicom/*
+dicoms/*
+dcmtk/
+dcmtk/*
