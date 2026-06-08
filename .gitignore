@@ -28,8 +28,7 @@ bin/*
 obj/*
 build/*
 prompt.md
-dicom/
-dicoms/
+
 
 dicom/*
 dicoms/*
