@@ -123,6 +123,7 @@ DicomViewerSDL::DicomViewerSDL(OrthancClient& client,
     , lastMouseX_(0), lastMouseY_(0)
     , currentMode_(AnnotationMode::WL)
     , placingAnnotation_(false), textInputActive_(false)
+    , cineMode_(false), cineSpeedMs_(200), lastFrameTime_(0)
     , sdlWindow_(nullptr), sdlRenderer_(nullptr), sdlTexture_(nullptr)
 {
     instanceIds_.push_back(instanceId);
@@ -144,6 +145,7 @@ DicomViewerSDL::DicomViewerSDL(OrthancClient& client,
     , lastMouseX_(0), lastMouseY_(0)
     , currentMode_(AnnotationMode::WL)
     , placingAnnotation_(false), textInputActive_(false)
+    , cineMode_(false), cineSpeedMs_(200), lastFrameTime_(0)
     , sdlWindow_(nullptr), sdlRenderer_(nullptr), sdlTexture_(nullptr)
 {}
 
@@ -1104,6 +1106,14 @@ void DicomViewerSDL::HandleKey(int key, unsigned short mod) {
         return;
     }
 
+    // Ctrl+S = Save screenshot
+    if (ctrl && k == SDLK_s) {
+        char path[256];
+        std::snprintf(path, sizeof(path), "/tmp/orthanc_screenshot_%d.bmp", (int)time(nullptr));
+        SaveScreenshot(path);
+        return;
+    }
+
     if (textInputActive_) {
         if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
             FinishTextAnnotation();
@@ -1115,9 +1125,15 @@ void DicomViewerSDL::HandleKey(int key, unsigned short mod) {
         return;
     }
 
-    // Series navigation
+    // Series navigation & Cine
     if (seriesMode_) {
+        if (k == SDLK_SPACE) {
+            cineMode_ = !cineMode_;
+            lastFrameTime_ = SDL_GetTicks();
+            return;
+        }
         if (k == SDLK_LEFT || k == SDLK_UP) {
+            cineMode_ = false;
             if (currentSeriesIndex_ > 0) {
                 LoadInstance(currentSeriesIndex_ - 1);
                 RenderWithWindowLevel(0, 0);
@@ -1125,6 +1141,7 @@ void DicomViewerSDL::HandleKey(int key, unsigned short mod) {
             return;
         }
         if (k == SDLK_RIGHT || k == SDLK_DOWN) {
+            cineMode_ = false;
             if (currentSeriesIndex_ < (int)instanceIds_.size() - 1) {
                 LoadInstance(currentSeriesIndex_ + 1);
                 RenderWithWindowLevel(0, 0);
@@ -1160,7 +1177,20 @@ void DicomViewerSDL::HandleKey(int key, unsigned short mod) {
         case SDLK_EQUALS: zoomFactor_ *= 1.2f; if (zoomFactor_ > 50.0f) zoomFactor_ = 50.0f; break;
         case SDLK_MINUS: zoomFactor_ /= 1.2f; if (zoomFactor_ < 0.1f) zoomFactor_ = 0.1f; break;
         case SDLK_0: zoomFactor_ = 1.0f; break;
+        case SDLK_p:
+        case SDLK_PRINTSCREEN: {
+            char path[256];
+            std::snprintf(path, sizeof(path), "/tmp/orthanc_screenshot_%d.bmp", (int)time(nullptr));
+            SaveScreenshot(path);
+            break;
+        }
         case SDLK_DELETE:
+        case SDLK_k:
+            cineSpeedMs_ = std::min(2000, cineSpeedMs_ + 50);
+            break;
+        case SDLK_l:
+            cineSpeedMs_ = std::max(30, cineSpeedMs_ - 50);
+            break;
         case SDLK_BACKSPACE:
             PushUndoState();
             switch (currentMode_) {
@@ -1694,6 +1724,33 @@ bool DicomViewerSDL::ExportSR(const std::string& outputPath) {
 }
 
 // ============================================================
+// Save screenshot to BMP
+// ============================================================
+bool DicomViewerSDL::SaveScreenshot(const std::string& filepath) {
+    if (!sdlRenderer_ || !sdlWindow_) {
+        std::cerr << "  [ERROR] Visor no inicializado\n";
+        return false;
+    }
+    SDL_Surface* surface = SDL_CreateRGBSurface(0, dicomWidth_, dicomHeight_, 32,
+                                                 0x00FF0000, 0x0000FF00,
+                                                 0x000000FF, 0xFF000000);
+    if (!surface) {
+        std::cerr << "  [ERROR] No se pudo crear superficie: " << SDL_GetError() << "\n";
+        return false;
+    }
+    SDL_RenderReadPixels((SDL_Renderer*)sdlRenderer_, nullptr,
+                         SDL_PIXELFORMAT_ARGB8888, surface->pixels, surface->pitch);
+    int ret = SDL_SaveBMP(surface, filepath.c_str());
+    SDL_FreeSurface(surface);
+    if (ret == 0) {
+        std::cout << "  \033[32mCaptura guardada: " << filepath << "\033[0m\n";
+        return true;
+    }
+    std::cerr << "  [ERROR] No se pudo guardar BMP: " << SDL_GetError() << "\n";
+    return false;
+}
+
+// ============================================================
 // Cleanup
 // ============================================================
 void DicomViewerSDL::CleanupSDL() {
@@ -1744,6 +1801,17 @@ int DicomViewerSDL::Run() {
                 case SDL_MOUSEBUTTONUP:   HandleMouseButton(ev.button.button, false, ev.button.x, ev.button.y); break;
                 case SDL_MOUSEWHEEL:      HandleMouseWheel(ev.wheel.y); break;
                 default: break;
+            }
+        }
+        // Cine auto-advance
+        if (seriesMode_ && cineMode_ && instanceIds_.size() > 1) {
+            unsigned int now = SDL_GetTicks();
+            if (now - lastFrameTime_ >= (unsigned int)cineSpeedMs_) {
+                int next = currentSeriesIndex_ + 1;
+                if (next >= (int)instanceIds_.size()) next = 0;
+                LoadInstance(next);
+                RenderWithWindowLevel(0, 0);
+                lastFrameTime_ = now;
             }
         }
         RenderFrame();

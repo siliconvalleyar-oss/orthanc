@@ -22,8 +22,10 @@ SOURCES = \
 	$(SRC_DIR)/main.cpp \
 	$(SRC_DIR)/orthanc_client.cpp \
 	$(SRC_DIR)/patient_worklist.cpp \
+	$(SRC_DIR)/modality_worklist.cpp \
 	$(SRC_DIR)/dicom_editor.cpp \
-	$(SRC_DIR)/dicom_viewer_sdl.cpp
+	$(SRC_DIR)/dicom_viewer_sdl.cpp \
+	$(SRC_DIR)/dicomdir_importer.cpp
 
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)
 TARGET = $(BIN_DIR)/dicom_worklist

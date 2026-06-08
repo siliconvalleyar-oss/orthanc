@@ -149,6 +149,95 @@ json OrthancClient::Find(const json& query) {
 }
 
 // ============================================================
+// C-MOVE SCU
+// ============================================================
+
+json OrthancClient::StartQuery(const json& query) {
+    return HttpPost("/queries", query);
+}
+
+json OrthancClient::GetQueryAnswers(const std::string& queryId) {
+    std::string response = HttpGet("/queries/" + queryId + "/answers");
+    if (response.empty()) return nullptr;
+    return json::parse(response);
+}
+
+json OrthancClient::RetrieveQuery(const std::string& queryId, const std::string& targetAet) {
+    json body;
+    body["TargetAet"] = targetAet;
+    return HttpPost("/queries/" + queryId + "/retrieve", body);
+}
+
+json OrthancClient::QueryRetrieve(const std::string& modality, const std::string& patientName,
+                                   const std::string& studyDate, const std::string& studyDesc)
+{
+    json query;
+    query["Level"] = "Study";
+    json q;
+    if (!patientName.empty()) q["PatientName"] = patientName;
+    if (!studyDate.empty()) q["StudyDate"] = studyDate;
+    if (!studyDesc.empty()) q["StudyDescription"] = studyDesc;
+    query["Query"] = q;
+
+    // Query via modality
+    auto result = HttpPost("/modalities/" + modality + "/query", query);
+    if (result.is_null()) return nullptr;
+
+    std::string queryId;
+    if (result.contains("ID")) queryId = result["ID"].get<std::string>();
+    else return nullptr;
+
+    // Retrieve
+    return RetrieveQuery(queryId, modality);
+}
+
+// ============================================================
+// C-STORE SCU
+// ============================================================
+
+json OrthancClient::SendToModality(const std::string& modality, const json& resources) {
+    json body;
+    body["Resources"] = resources;
+    body["Synchronous"] = true;
+    return HttpPost("/modalities/" + modality + "/store", body);
+}
+
+// ============================================================
+// KOS (Key Object Selection)
+// ============================================================
+
+json OrthancClient::CreateKos(const std::string& seriesId,
+                               const std::vector<std::string>& instanceIds,
+                               const std::string& description)
+{
+    json body;
+    body["Series"] = seriesId;
+    body["Instances"] = instanceIds;
+    if (!description.empty()) body["Description"] = description;
+    return HttpPost("/tools/create-dicom", body);
+}
+
+// ============================================================
+// Anonymization
+// ============================================================
+
+json OrthancClient::AnonymizePatient(const std::string& patientId,
+                                      const std::string& newName,
+                                      const std::string& newId)
+{
+    json body;
+    if (!newName.empty()) {
+        body["Replace"] = json::object();
+        body["Replace"]["PatientName"] = newName;
+    }
+    if (!newId.empty()) {
+        if (!body.contains("Replace")) body["Replace"] = json::object();
+        body["Replace"]["PatientID"] = newId;
+    }
+    return HttpPost("/patients/" + patientId + "/anonymize", body);
+}
+
+// ============================================================
 // Private HTTP methods
 // ============================================================
 

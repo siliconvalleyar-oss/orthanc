@@ -11,14 +11,17 @@
 
 #include "orthanc_client.h"
 #include "patient_worklist.h"
+#include "modality_worklist.h"
 #include "dicom_editor.h"
 #include "dicom_viewer_sdl.h"
+#include "dicomdir_importer.h"
 
 #include <iostream>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
+#include <sstream>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -72,6 +75,12 @@ void ShowMainMenu() {
     std::cout << "  \033[33m[2]\033[0m Buscar Pacientes\n";
     std::cout << "  \033[33m[3]\033[0m Escanear carpeta DICOM local\n";
     std::cout << "  \033[33m[4]\033[0m Estado del servidor Orthanc\n";
+    std::cout << "  \033[33m[5]\033[0m Modality Worklist - Pacientes Programados\n";
+    std::cout << "  \033[33m[6]\033[0m C-MOVE - Recuperar estudios desde PACS remoto\n";
+    std::cout << "  \033[33m[7]\033[0m C-STORE - Enviar estudios a nodo DICOM\n";
+    std::cout << "  \033[33m[8]\033[0m Importar DICOMDIR\n";
+    std::cout << "  \033[33m[9]\033[0m Anonimizar paciente\n";
+    std::cout << " \033[33m[10]\033[0m KOS - Key Object Selection\n";
     std::cout << "  \033[33m[0]\033[0m Salir\n";
     std::cout << "\n  \033[1mSeleccione una opcion: \033[0m";
 }
@@ -519,6 +528,489 @@ void ShowSystemStatus(OrthancClient& client) {
 }
 
 // ============================================================
+// Menu: Modality Worklist
+// ============================================================
+
+void ShowModalityWorklist(OrthancClient& client) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mMODALITY WORKLIST - CONSULTA DE PACIENTES PROGRAMADOS\033[0m\n";
+    PrintSeparator();
+
+    std::cout << "\n  \033[33mFiltros de busqueda (deje vacio para omitir):\033[0m\n";
+
+    std::cout << "\n  Nombre del paciente: \033[33m";
+    std::cout << "\033[0m";
+    std::string patientName;
+    std::getline(std::cin, patientName);
+    patientName = Trim(patientName);
+
+    std::cout << "  Fecha (YYYYMMDD): \033[33m";
+    std::cout << "\033[0m";
+    std::string startDate;
+    std::getline(std::cin, startDate);
+    startDate = Trim(startDate);
+
+    std::cout << "  Modalidad (US, MR, CT, etc): \033[33m";
+    std::cout << "\033[0m";
+    std::string modality;
+    std::getline(std::cin, modality);
+    modality = Trim(modality);
+    modality = ToUpper(modality);
+
+    std::cout << "\n  \033[33mConsultando worklist...\033[0m\n";
+
+    ModalityWorklist mwl(client);
+    if (!mwl.Query(patientName, startDate, modality)) {
+        std::cout << "\n  \033[31m[ERROR] " << mwl.GetLastError() << "\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    ClearScreen();
+    PrintHeader();
+    mwl.PrintWorklist();
+
+    if (mwl.GetEntryCount() > 0) {
+        std::cout << "\n  \033[33mSeleccione entrada para ver detalles (numero o 0 para volver): \033[0m";
+        std::string choice;
+        std::getline(std::cin, choice);
+
+        int entryNum = 0;
+        try { entryNum = std::stoi(choice); } catch (...) {}
+
+        if (entryNum > 0 && entryNum <= (int)mwl.GetEntryCount()) {
+            ClearScreen();
+            PrintHeader();
+            mwl.PrintEntryDetails(entryNum - 1);
+
+            std::cout << "\n  \033[33m[1]\033[0m Buscar expediente en Orthanc\n";
+            std::cout << "  \033[33m[0]\033[0m Volver\n";
+            std::cout << "\n  \033[1mSeleccione: \033[0m";
+
+            std::string action;
+            std::getline(std::cin, action);
+
+            if (action == "1") {
+                std::string pid = mwl.GetPatientId(entryNum - 1);
+                std::string name = mwl.GetPatientName(entryNum - 1);
+
+                if (!pid.empty() && pid != "N/A") {
+                    PatientWorklist worklist(client);
+                    if (worklist.Refresh()) {
+                        auto results = worklist.FindPatients(pid);
+                        if (!results.empty()) {
+                            ShowPatientActions(client, worklist, results[0]);
+                        } else if (!name.empty()) {
+                            results = worklist.FindPatients(name);
+                            if (!results.empty()) {
+                                ShowPatientActions(client, worklist, results[0]);
+                            } else {
+                                std::cout << "\n  \033[33mPaciente no encontrado en Orthanc.\033[0m\n";
+                                PressEnterToContinue();
+                            }
+                        }
+                    }
+                } else if (!name.empty()) {
+                    PatientWorklist worklist(client);
+                    if (worklist.Refresh()) {
+                        auto results = worklist.FindPatients(name);
+                        if (!results.empty()) {
+                            ShowPatientActions(client, worklist, results[0]);
+                        } else {
+                            std::cout << "\n  \033[33mPaciente no encontrado en Orthanc.\033[0m\n";
+                            PressEnterToContinue();
+                        }
+                    }
+                } else {
+                    std::cout << "\n  \033[33mNo hay datos del paciente para buscar.\033[0m\n";
+                    PressEnterToContinue();
+                }
+            }
+        }
+    } else {
+        PressEnterToContinue();
+    }
+}
+
+// ============================================================
+// Menu: C-MOVE SCU (Query/Retrieve)
+// ============================================================
+
+void ShowQueryRetrieve(OrthancClient& client) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mC-MOVE - RECUPERAR ESTUDIOS DESDE PACS REMOTO\033[0m\n";
+    PrintSeparator();
+
+    std::cout << "\n  Ingrese el nombre de la modalidad/PACS remoto\n";
+    std::cout << "  (configurado en Orthanc como DicomModalities):\n";
+    std::cout << "  \033[33m> \033[0m";
+    std::string modality;
+    std::getline(std::cin, modality);
+    modality = Trim(modality);
+    if (modality.empty()) { PressEnterToContinue(); return; }
+
+    std::cout << "\n  \033[33mFiltros de busqueda (deje vacio para omitir):\033[0m\n";
+    std::cout << "  Nombre del paciente: \033[33m";
+    std::cout << "\033[0m";
+    std::string patientName;
+    std::getline(std::cin, patientName);
+    patientName = Trim(patientName);
+
+    std::cout << "  Fecha estudio (YYYYMMDD): \033[33m";
+    std::cout << "\033[0m";
+    std::string studyDate;
+    std::getline(std::cin, studyDate);
+    studyDate = Trim(studyDate);
+
+    std::cout << "  Descripcion estudio: \033[33m";
+    std::cout << "\033[0m";
+    std::string studyDesc;
+    std::getline(std::cin, studyDesc);
+    studyDesc = Trim(studyDesc);
+
+    std::cout << "\n  \033[33mEnviando consulta C-MOVE a '" << modality << "'...\033[0m\n";
+
+    auto result = client.QueryRetrieve(modality, patientName, studyDate, studyDesc);
+    if (result.is_null()) {
+        std::cout << "\n  \033[31m[ERROR] " << client.GetLastError() << "\033[0m\n";
+    } else {
+        std::cout << "\n  \033[32mConsulta enviada exitosamente.\033[0m\n";
+        if (result.contains("Description"))
+            std::cout << "  Descripcion: " << result["Description"] << "\n";
+        if (result.contains("ID"))
+            std::cout << "  Query ID: " << result["ID"] << "\n";
+        std::cout << "\n  Los estudios recuperados apareceran en la lista de pacientes.\n";
+    }
+    PressEnterToContinue();
+}
+
+// ============================================================
+// Menu: C-STORE SCU (Send)
+// ============================================================
+
+void ShowStoreScu(OrthancClient& client, PatientWorklist& worklist) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mC-STORE - ENVIAR ESTUDIOS A NODO DICOM\033[0m\n";
+    PrintSeparator();
+
+    if (worklist.GetPatientCount() == 0) {
+        std::cout << "\n  \033[33mNo hay pacientes. Refresque la lista primero.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    worklist.PrintWorklist();
+
+    std::cout << "\n  \033[33mSeleccione paciente (numero o 0 para volver): \033[0m";
+    std::string choice;
+    std::getline(std::cin, choice);
+    int patientNum = 0;
+    try { patientNum = std::stoi(choice); } catch (...) {}
+    if (patientNum <= 0 || patientNum > (int)worklist.GetPatientCount()) return;
+
+    auto studies = worklist.GetPatientStudies(patientNum - 1);
+    if (studies.is_null() || studies.empty()) {
+        std::cout << "\n  \033[33mEl paciente no tiene estudios.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    std::cout << "\n  \033[1mEstudios disponibles:\033[0m\n";
+    for (size_t i = 0; i < studies.size(); i++) {
+        std::string desc = "N/A";
+        if (studies[i].contains("MainDicomTags") &&
+            studies[i]["MainDicomTags"].contains("StudyDescription"))
+            desc = studies[i]["MainDicomTags"]["StudyDescription"].get<std::string>();
+        std::cout << "  \033[33m[" << (i+1) << "]\033[0m " << desc << "\n";
+    }
+
+    std::cout << "\n  \033[33mSeleccione estudio (numero): \033[0m";
+    std::string studyChoice;
+    std::getline(std::cin, studyChoice);
+    int studyNum = 0;
+    try { studyNum = std::stoi(studyChoice); } catch (...) {}
+    if (studyNum <= 0 || studyNum > (int)studies.size()) return;
+
+    std::string studyId;
+    if (studies[studyNum - 1].contains("ID"))
+        studyId = studies[studyNum - 1]["ID"].get<std::string>();
+
+    std::cout << "\n  Ingrese el nombre del nodo DICOM destino:\n";
+    std::cout << "  \033[33m> \033[0m";
+    std::string targetModality;
+    std::getline(std::cin, targetModality);
+    targetModality = Trim(targetModality);
+    if (targetModality.empty()) return;
+
+    json resources;
+    resources.push_back(studyId);
+
+    std::cout << "\n  \033[33mEnviando estudio a '" << targetModality << "'...\033[0m\n";
+    auto result = client.SendToModality(targetModality, resources);
+    if (!result.is_null()) {
+        std::cout << "\n  \033[32mEstudio enviado exitosamente.\033[0m\n";
+    } else {
+        std::cout << "\n  \033[31m[ERROR] " << client.GetLastError() << "\033[0m\n";
+    }
+    PressEnterToContinue();
+}
+
+// ============================================================
+// Menu: DICOMDIR Import
+// ============================================================
+
+void ShowDicomdirImport(OrthancClient& client) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mIMPORTAR DICOMDIR\033[0m\n";
+    PrintSeparator();
+
+    std::cout << "\n  Ruta del archivo DICOMDIR (Enter para 'DICOMDIR'):\n";
+    std::cout << "  \033[33m> \033[0m";
+    std::string path;
+    std::getline(std::cin, path);
+    path = Trim(path);
+    if (path.empty()) path = "DICOMDIR";
+
+    DicomdirImporter importer(client);
+    if (!importer.Scan(path)) {
+        std::cout << "\n  \033[31m[ERROR] " << importer.GetLastError() << "\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    ClearScreen();
+    PrintHeader();
+    importer.PrintEntries();
+
+    if (importer.GetEntryCount() > 0) {
+        std::cout << "\n  \033[33mImportar todos los archivos a Orthanc? (s/N): \033[0m";
+        std::string confirm;
+        std::getline(std::cin, confirm);
+        confirm = ToUpper(Trim(confirm));
+
+        if (confirm == "S" || confirm == "SI") {
+            std::cout << "\n  Importando...\n";
+            int ok = importer.ImportAll();
+            std::cout << "\n  \033[32mImportados: " << ok << "/" << importer.GetEntryCount() << "\033[0m\n";
+        }
+    }
+    PressEnterToContinue();
+}
+
+// ============================================================
+// Menu: Anonymize
+// ============================================================
+
+void ShowAnonymize(OrthancClient& client, PatientWorklist& worklist) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mANONIMIZAR PACIENTE\033[0m\n";
+    std::cout << "\n  Crea una copia del paciente con datos anonimos.\n";
+    PrintSeparator();
+
+    if (worklist.GetPatientCount() == 0) {
+        std::cout << "\n  \033[33mNo hay pacientes. Refresque la lista primero.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    worklist.PrintWorklist();
+
+    std::cout << "\n  \033[33mSeleccione paciente a anonimizar (numero o 0 para volver): \033[0m";
+    std::string choice;
+    std::getline(std::cin, choice);
+    int patientNum = 0;
+    try { patientNum = std::stoi(choice); } catch (...) {}
+    if (patientNum <= 0 || patientNum > (int)worklist.GetPatientCount()) return;
+
+    const auto& patient = worklist.GetPatient(patientNum - 1);
+    std::string patientId;
+    if (patient.contains("ID")) patientId = patient["ID"].get<std::string>();
+
+    std::string origName = worklist.GetPatientName(patientNum - 1);
+    std::string origId;
+    {
+        auto& p = worklist.GetPatient(patientNum - 1);
+        if (p.contains("MainDicomTags") && p["MainDicomTags"].contains("PatientID"))
+            origId = p["MainDicomTags"]["PatientID"].get<std::string>();
+    }
+
+    std::cout << "\n  Paciente original: \033[1m" << origName << "\033[0m (ID: " << origId << ")\n";
+    std::cout << "\n  \033[33mNuevo nombre anonimo (Enter = 'Anonimo'): \033[0m";
+    std::string newName;
+    std::getline(std::cin, newName);
+    newName = Trim(newName);
+    if (newName.empty()) newName = "Anonimo";
+
+    std::cout << "  \033[33mNuevo ID (Enter = auto-generado): \033[0m";
+    std::string newId;
+    std::getline(std::cin, newId);
+    newId = Trim(newId);
+
+    std::cout << "\n  \033[33mCreando copia anonimizada...\033[0m\n";
+    auto result = client.AnonymizePatient(patientId, newName, newId);
+    if (!result.is_null()) {
+        std::cout << "\n  \033[32mPaciente anonimizado exitosamente.\033[0m\n";
+        if (result.contains("ID"))
+            std::cout << "  Nuevo Orthanc ID: " << result["ID"] << "\n";
+        std::cout << "\n  Refresque la worklist para ver el nuevo paciente.\n";
+    } else {
+        std::cout << "\n  \033[31m[ERROR] " << client.GetLastError() << "\033[0m\n";
+    }
+    PressEnterToContinue();
+}
+
+// ============================================================
+// Menu: KOS (Key Object Selection)
+// ============================================================
+
+void ShowKos(OrthancClient& client, PatientWorklist& worklist) {
+    ClearScreen();
+    PrintHeader();
+
+    std::cout << "\n  \033[1mKOS - KEY OBJECT SELECTION\033[0m\n";
+    std::cout << "\n  Crea un Key Object Selection que marca instancias significativas.\n";
+    PrintSeparator();
+
+    if (worklist.GetPatientCount() == 0) {
+        std::cout << "\n  \033[33mNo hay pacientes. Refresque la lista primero.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    worklist.PrintWorklist();
+    std::cout << "\n  \033[33mSeleccione paciente (numero o 0 para volver): \033[0m";
+    std::string choice;
+    std::getline(std::cin, choice);
+    int patientNum = 0;
+    try { patientNum = std::stoi(choice); } catch (...) {}
+    if (patientNum <= 0 || patientNum > (int)worklist.GetPatientCount()) return;
+
+    auto studies = worklist.GetPatientStudies(patientNum - 1);
+    if (studies.is_null() || studies.empty()) {
+        std::cout << "\n  \033[33mNo hay estudios.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    for (size_t i = 0; i < studies.size(); i++) {
+        std::string desc = "N/A";
+        if (studies[i].contains("MainDicomTags") &&
+            studies[i]["MainDicomTags"].contains("StudyDescription"))
+            desc = studies[i]["MainDicomTags"]["StudyDescription"].get<std::string>();
+        std::cout << "\n  \033[33m[" << (i+1) << "]\033[0m " << desc;
+        if (studies[i].contains("MainDicomTags") &&
+            studies[i]["MainDicomTags"].contains("StudyDate"))
+            std::cout << " (" << studies[i]["MainDicomTags"]["StudyDate"] << ")";
+    }
+
+    std::cout << "\n\n  \033[33mSeleccione estudio (numero): \033[0m";
+    std::string studyChoice;
+    std::getline(std::cin, studyChoice);
+    int studyNum = 0;
+    try { studyNum = std::stoi(studyChoice); } catch (...) {}
+    if (studyNum <= 0 || studyNum > (int)studies.size()) return;
+
+    std::string studyId;
+    if (studies[studyNum - 1].contains("ID"))
+        studyId = studies[studyNum - 1]["ID"].get<std::string>();
+
+    auto series = worklist.GetStudySeries(studyId);
+    if (series.is_null() || series.empty()) {
+        std::cout << "\n  \033[33mNo hay series en este estudio.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    std::cout << "\n  Series disponibles:\n";
+    for (size_t i = 0; i < series.size(); i++) {
+        std::string mod = "N/A";
+        if (series[i].contains("MainDicomTags") &&
+            series[i]["MainDicomTags"].contains("Modality"))
+            mod = series[i]["MainDicomTags"]["Modality"].get<std::string>();
+        std::string desc = "N/A";
+        if (series[i].contains("MainDicomTags") &&
+            series[i]["MainDicomTags"].contains("SeriesDescription"))
+            desc = series[i]["MainDicomTags"]["SeriesDescription"].get<std::string>();
+        std::cout << "  \033[33m[" << (i+1) << "]\033[0m [" << mod << "] " << desc;
+        if (series[i].contains("Instances"))
+            std::cout << " (" << series[i]["Instances"].size() << " img)";
+        std::cout << "\n";
+    }
+
+    std::cout << "\n  \033[33mSeleccione serie para KOS (numero): \033[0m";
+    std::string seriesChoice;
+    std::getline(std::cin, seriesChoice);
+    int seriesNum = 0;
+    try { seriesNum = std::stoi(seriesChoice); } catch (...) {}
+    if (seriesNum <= 0 || seriesNum > (int)series.size()) return;
+
+    std::string seriesId;
+    if (series[seriesNum - 1].contains("ID"))
+        seriesId = series[seriesNum - 1]["ID"].get<std::string>();
+
+    auto instances = worklist.GetSeriesInstances(seriesId);
+    if (instances.is_null() || instances.empty()) {
+        std::cout << "\n  \033[33mNo hay instancias en esta serie.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    std::cout << "\n  " << instances.size() << " instancias disponibles.\n";
+    std::cout << "  \033[33mInstancias a incluir (ej: 1,3,5 o 'all'): \033[0m";
+    std::string instChoice;
+    std::getline(std::cin, instChoice);
+    instChoice = Trim(instChoice);
+
+    std::vector<std::string> instanceIds;
+    if (instChoice == "all") {
+        for (const auto& inst : instances) {
+            if (inst.contains("ID"))
+                instanceIds.push_back(inst["ID"].get<std::string>());
+        }
+    } else {
+        std::string token;
+        std::istringstream tokenStream(instChoice);
+        while (std::getline(tokenStream, token, ',')) {
+            int idx = 0;
+            try { idx = std::stoi(Trim(token)); } catch (...) { continue; }
+            if (idx > 0 && idx <= (int)instances.size() && instances[idx-1].contains("ID"))
+                instanceIds.push_back(instances[idx-1]["ID"].get<std::string>());
+        }
+    }
+
+    if (instanceIds.empty()) {
+        std::cout << "\n  \033[33mNo se seleccionaron instancias.\033[0m\n";
+        PressEnterToContinue();
+        return;
+    }
+
+    std::cout << "\n  \033[33mDescripcion del KOS (Enter = 'Key Objects'): \033[0m";
+    std::string desc;
+    std::getline(std::cin, desc);
+    desc = Trim(desc);
+    if (desc.empty()) desc = "Key Objects";
+
+    std::cout << "\n  \033[33mCreando KOS con " << instanceIds.size() << " instancias...\033[0m\n";
+    auto result = client.CreateKos(seriesId, instanceIds, desc);
+    if (!result.is_null()) {
+        std::cout << "\n  \033[32mKOS creado exitosamente.\033[0m\n";
+    } else {
+        std::cout << "\n  \033[31m[ERROR] " << client.GetLastError() << "\033[0m\n";
+    }
+    PressEnterToContinue();
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -571,6 +1063,52 @@ int main() {
         }
         else if (choice == "4") {
             ShowSystemStatus(client);
+        }
+        else if (choice == "5") {
+            if (connected) {
+                ShowModalityWorklist(client);
+            } else {
+                std::cout << "\n  \033[31m[ERROR] No hay conexion con Orthanc\033[0m\n";
+                PressEnterToContinue();
+            }
+        }
+        else if (choice == "6") {
+            if (connected) {
+                ShowQueryRetrieve(client);
+            } else {
+                std::cout << "\n  \033[31m[ERROR] No hay conexion con Orthanc\033[0m\n";
+                PressEnterToContinue();
+            }
+        }
+        else if (choice == "7") {
+            if (connected) {
+                worklist.Refresh();
+                ShowStoreScu(client, worklist);
+            } else {
+                std::cout << "\n  \033[31m[ERROR] No hay conexion con Orthanc\033[0m\n";
+                PressEnterToContinue();
+            }
+        }
+        else if (choice == "8") {
+            ShowDicomdirImport(client);
+        }
+        else if (choice == "9") {
+            if (connected) {
+                worklist.Refresh();
+                ShowAnonymize(client, worklist);
+            } else {
+                std::cout << "\n  \033[31m[ERROR] No hay conexion con Orthanc\033[0m\n";
+                PressEnterToContinue();
+            }
+        }
+        else if (choice == "10") {
+            if (connected) {
+                worklist.Refresh();
+                ShowKos(client, worklist);
+            } else {
+                std::cout << "\n  \033[31m[ERROR] No hay conexion con Orthanc\033[0m\n";
+                PressEnterToContinue();
+            }
         }
         else if (choice == "0") {
             running = false;

@@ -72,6 +72,34 @@ public:
     /** Realiza una búsqueda C-FIND avanzada */
     json Find(const json& query);
 
+    // ========== C-MOVE SCU ==========
+    /** Inicia una consulta C-FIND a un PACS remoto */
+    json StartQuery(const json& query);
+    
+    /** Obtiene resultados de una consulta previa */
+    json GetQueryAnswers(const std::string& queryId);
+    
+    /** Recupera estudios desde un PACS remoto via C-MOVE */
+    json RetrieveQuery(const std::string& queryId, const std::string& targetAet);
+    
+    /** Atajo: consulta y recupera estudios de una modalidad remota */
+    json QueryRetrieve(const std::string& modality, const std::string& patientName = "",
+                       const std::string& studyDate = "", const std::string& studyDesc = "");
+
+    // ========== C-STORE SCU ==========
+    /** Envía recursos DICOM a una modalidad/nodo remoto */
+    json SendToModality(const std::string& modality, const json& resources);
+
+    // ========== KOS (Key Object Selection) ==========
+    /** Crea un KOS a partir de una lista de instancias */
+    json CreateKos(const std::string& seriesId, const std::vector<std::string>& instanceIds,
+                   const std::string& description = "");
+
+    // ========== Anonymization ==========
+    /** Crea una copia anonimizada de un paciente */
+    json AnonymizePatient(const std::string& patientId, const std::string& newName = "",
+                          const std::string& newId = "");
+
     // ========== Utilidad ==========
     /** Obtiene el último error */
     std::string GetLastError() const { return lastError_; }

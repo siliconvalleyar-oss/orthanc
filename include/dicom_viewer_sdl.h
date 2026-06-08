@@ -166,12 +166,18 @@ private:
     std::vector<AnnotationSnapshot> undoStack_;
     std::vector<AnnotationSnapshot> redoStack_;
 
+    // Cine mode
+    bool cineMode_;
+    int cineSpeedMs_;
+    unsigned int lastFrameTime_;
+
     // SDL handles
     void* sdlWindow_;
     void* sdlRenderer_;
     void* sdlTexture_;
 
     // Private methods
+    bool SaveScreenshot(const std::string& filepath);
     bool LoadInstance(int index);
     bool DownloadFromOrthanc();
     bool LoadDicomFromOrthanc();
